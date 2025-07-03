@@ -1,74 +1,118 @@
+import os
 from ultralytics import YOLO
 import cv2
 import schedule
-import os
 import torch
 from PIL import Image, ImageDraw, ImageFont
 import numpy as np
 
-torch.cuda.set_device(0)
+# 1) Determine base directory (where this script lives)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-def captureImage():
-    ret, frame = cam.read()
+# 2) Use the existing temp/images folder under the script directory
+out_dir = os.path.join(BASE_DIR, "temp", "images")
+os.makedirs(out_dir, exist_ok=True)
 
-    # Draw the count on the image using PIL
+# 3) Pick device
+device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
-    # Convert back to OpenCV format
-    
-    cv2.imwrite(f'temp/images/image.png', frame) # writes captured image in local folder /temp/images/camTopic.png
+# 4) Load YOLO model
+print("Loading pretrained YOLO…")
+model = YOLO("yolov8x.pt").to(device)
 
-    predictImage()
-
-
-def predictImage():
-    global mqttClient
-    global siteTopic
-    global predicted
-    global imgCounterMax
-
-    # results = model(f'temp/images/image.png', conf=0.3, save=True, device='gpu') # predict all on image with minimum confidence of 0.3
-    results = model(f'temp/images/image.png', classes=0, conf=0.3, save=True, device='gpu') # predict humans on image with minimum confidence of 0.3
-
-    for result in results:
-        if (len(predicted) < imgCounterMax): # if there's not enough samples to calculate mean
-            humanCounter = result.boxes.cls.tolist().count(0)
-            predicted.append(humanCounter)
-            ## Draw the count on the image using PIL
-            img = Image.open('temp/images/image.png')
-            draw = ImageDraw.Draw(img)
-            font = ImageFont.load_default()  # Use default PIL font
-
-            # Draw the count on the image using the correct count from humanCounter
-            draw.text((10, 10), f'Count: {humanCounter}', font=font, fill=(0, 255, 0))
-
-            # Save the annotated image
-            img.save('temp/images/image_with_count.png')
-            
-        else: # when there is enough samples, publish the mean to mqtt topic
-            humanCounterMean = round(sum(predicted)/len(predicted))
-            print(f'Mean of predicted people in the last {len(predicted)} images is {humanCounterMean}')
-            predicted = [] # resets predicted array
-            publishContent = f'{{"counter": {humanCounterMean}}}'
-''
-
-if not os.path.exists("temp/images/"): # creates temp dir for captured images if not exists
-    os.makedirs("temp/images/")
-
-captureInterval = 1 # interval in seconds to capture images
-publishInterval = 60 # interval in seconds to publish human detection
-imgCounterMax = publishInterval/captureInterval
-predicted = []
- 
-print('Loading pretrained neural network...')
-model = YOLO("yolov8x.pt")  # load a pretrained model (recommended for training)
-
-print('Loading cam...')
-cam = cv2.VideoCapture(2) # define cam object
+# 5) Open webcam (index 0 or change as needed)
+print("Loading cam…")
+cam = cv2.VideoCapture(0, cv2.CAP_DSHOW)
 cam.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
 cam.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
 
-print('Starting prediction system...')
-schedule.every(captureInterval).seconds.do(captureImage)
+# 6) Prepare live-view window
+cv2.namedWindow("Live Detection", cv2.WINDOW_NORMAL)
 
-while True:
-    schedule.run_pending()
+# 7) Scheduling parameters
+capture_interval = 1    # seconds between captures
+publish_interval = 60   # seconds to average over
+img_counter_max = publish_interval // capture_interval
+predicted_counts = []
+
+# 8) Load a bold font (fall back to default)
+try:
+    font = ImageFont.truetype("DejaVuSans-Bold.ttf", size=50)
+except IOError:
+    font = ImageFont.load_default()
+orange = (255, 165,  80)  # soft orange RGB
+
+def capture_and_predict():
+    global predicted_counts
+
+    ret, frame = cam.read()
+    if not ret:
+        print("Failed to capture frame")
+        return
+
+    # BGR → RGB for PIL & model
+    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    pil_img = Image.fromarray(rgb)
+    draw = ImageDraw.Draw(pil_img)
+
+    # Inference
+    results = model(rgb, classes=0, conf=0.40)
+
+    # Draw thicker boxes & count humans
+    human_count = 0
+    for res in results:
+        boxes = res.boxes.xyxy.cpu().numpy().astype(int)
+        classes = res.boxes.cls.cpu().numpy().astype(int)
+        for (x1, y1, x2, y2), cls in zip(boxes, classes):
+            if cls == 0:
+                human_count += 1
+                draw.rectangle(
+                    [(x1, y1), (x2, y2)],
+                    outline=orange,
+                    width=6  # even thicker border
+                )
+
+    predicted_counts.append(human_count)
+    print(f"Captured frame, detected {human_count} person(s)")
+
+    # Draw the current count with white fill and black outline
+    text = f"Número de Pessoas: {human_count}"
+    draw.text(
+        (10, 10),
+        text,
+        font=font,
+        fill="white",
+        stroke_width=2,
+        stroke_fill="black"
+    )
+
+    # Convert back to BGR for saving & display
+    annotated_bgr = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+
+    # Save (overwrite) the same filename each time
+    out_path = os.path.join(out_dir, "image_with_count.png")
+    success = cv2.imwrite(out_path, annotated_bgr)
+    if success:
+        print("Wrote annotated image to:", out_path)
+    else:
+        print("Failed to save image to:", out_path)
+
+    # Show live in a window
+    cv2.imshow("Live Detection", annotated_bgr)
+    cv2.waitKey(1)  # allow GUI to refresh
+
+    # After enough frames, compute & log the mean
+    if len(predicted_counts) >= img_counter_max:
+        mean_count = round(sum(predicted_counts) / len(predicted_counts))
+        predicted_counts.clear()
+        print(f"Mean over last {img_counter_max} frames: {mean_count}")
+
+# 9) Start scheduler
+schedule.every(capture_interval).seconds.do(capture_and_predict)
+print("Starting prediction loop…")
+try:
+    while True:
+        schedule.run_pending()
+finally:
+    cam.release()
+    cv2.destroyAllWindows()
