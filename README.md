@@ -1,2 +1,12 @@
-# Nimbus
-This project is dedicated to detect people using a set of cameras and sensors that provide depth information and can accurately predict when someone is present in a determined location. For this project we're using the kinect sensor, which is a device developed by microsoft that is able to provide the kind of data that we need to work with.  
+# Create & activate conda env
+conda create -n human_detection python=3.9 -y
+conda activate human_detection
+
+# Install PyTorch (with CUDA if available; adjust cudatoolkit version to match your GPU/driver)
+conda install -c pytorch pytorch torchvision torchaudio cudatoolkit=11.7 -y
+
+# Install other dependencies
+conda install -c conda-forge opencv pillow numpy schedule -y
+
+# Install YOLO package
+pip install ultralytics
